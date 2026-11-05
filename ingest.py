@@ -11,7 +11,7 @@ import json
 import os
 import time
 import requests
-from datetime  import datetime
+from datetime  import datetime, timezone
 from pathlib import Path
 
 import requests
