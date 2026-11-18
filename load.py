@@ -1,11 +1,10 @@
 """
-Step 3 of the pipeline: LOAD.
+Step 3 of the pipeline: LOAD (teams, matches, standings).
 
 Take the clean rows from transform.py and write them into PostgreSQL.
 Safe to re-run: if a team or match already exists, we UPDATE it instead of
 inserting a duplicate (this is called an "upsert").
 """
-
 
 import json
 import os
@@ -13,7 +12,8 @@ import os
 import psycopg2
 from dotenv import load_dotenv
 
-from transform import extract_teams, flatten_match, latest_raw_file
+from transform import (extract_teams, flatten_match, flatten_standings,
+                       latest_raw_file, snapshot_date_from_path)
 
 load_dotenv()  # reads your DB_* settings from the .env file
 
@@ -41,6 +41,22 @@ UPSERT_MATCH = """
         home_goals = EXCLUDED.home_goals,
         away_goals = EXCLUDED.away_goals,
         winner = EXCLUDED.winner;
+"""
+
+UPSERT_STANDING = """
+    INSERT INTO standings (snapshot_date, team_id, position, played, won, draw, lost,
+                           goals_for, goals_against, points)
+    VALUES (%(snapshot_date)s, %(team_id)s, %(position)s, %(played)s, %(won)s, %(draw)s,
+            %(lost)s, %(goals_for)s, %(goals_against)s, %(points)s)
+    ON CONFLICT (snapshot_date, team_id) DO UPDATE SET
+        position = EXCLUDED.position,
+        played = EXCLUDED.played,
+        won = EXCLUDED.won,
+        draw = EXCLUDED.draw,
+        lost = EXCLUDED.lost,
+        goals_for = EXCLUDED.goals_for,
+        goals_against = EXCLUDED.goals_against,
+        points = EXCLUDED.points;
 """
 
 
@@ -72,6 +88,12 @@ def main() -> None:
     matches = [flatten_match(m) for m in raw["matches"]]
     teams = list(extract_teams(raw["matches"]).values())
 
+    standings_path = latest_raw_file("standings")
+    print(f"Reading {standings_path}")
+    with open(standings_path, encoding="utf-8") as f:
+        raw_standings = json.load(f)
+    standings = flatten_standings(raw_standings, snapshot_date_from_path(standings_path))
+
     conn = get_connection()
     try:
         # "with conn" = one transaction: everything saves together, or nothing does.
@@ -79,10 +101,13 @@ def main() -> None:
             # Teams first, because matches point to them (foreign keys).
             cur.executemany(UPSERT_TEAM, teams)
             cur.executemany(UPSERT_MATCH, matches)
+            cur.executemany(UPSERT_STANDING, standings)
 
-            print(f"Sent {len(teams)} teams and {len(matches)} matches.")
+            print(f"Sent {len(teams)} teams, {len(matches)} matches, "
+                  f"{len(standings)} standings rows.")
             print(f"Rows now in the database: teams = {count_rows(cur, 'teams')}, "
-                  f"matches = {count_rows(cur, 'matches')}")
+                  f"matches = {count_rows(cur, 'matches')}, "
+                  f"standings = {count_rows(cur, 'standings')}")
     finally:
         conn.close()
 
